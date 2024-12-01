@@ -1,20 +1,51 @@
 """
 store all the agents here
 """
+import torch
+import torch.nn as nn
+
 from replay_buffer import ReplayBuffer, ReplayBufferNumpy
 import numpy as np
 import time
 import pickle
 from collections import deque
 import json
-import tensorflow as tf
-from tensorflow.keras.regularizers import l2
-from tensorflow.keras.optimizers import RMSprop, SGD, Adam
-import tensorflow.keras.backend as K
-from tensorflow.keras.layers import Input, Conv2D, Flatten, Dense, Softmax, MaxPool2D
-from tensorflow.keras import Model
-from tensorflow.keras.regularizers import l2
+# import tensorflow as tf
+# from tensorflow.keras.regularizers import l2
+#from tensorflow.keras.optimizers import #Adam, SGD, RMSprop
+#import tensorflow.keras.backend as K
+# from tensorflow.keras.layers import Input, Conv2D, Flatten, Dense, Softmax, MaxPool2D
+# from tensorflow.keras import Model
+# from tensorflow.keras.regularizers import l2
 # from tensorflow.keras.losses import Huber
+
+class SnakeModel(nn.Module):
+    def __init__(self, model_config, board_size, n_frames):
+        super(SnakeModel, self).__init__()
+        
+        self.input_board = torch.Tensor((board_size, board_size, n_frames))
+        self.model_config = model_config
+        self.next_in_channels = board_size
+
+        self.conv = nn.Sequential(
+            nn.Conv2d(10, 16, (3, 3), 1, "same"),
+            nn.ReLU(),
+
+            nn.Conv2d(16, 32, (3, 3), 1, "same"),
+            nn.ReLU(),
+
+            nn.Conv2d(32, 64, (5, 5), 1, "same"),
+            nn.ReLU(),
+
+            nn.Flatten(),
+
+            nn.Linear(64,64),
+            nn.ReLU()
+        )
+
+    def forward(self, x: torch.Tensor) -> dict:
+        x = self.conv(x)
+        return x
 
 def huber_loss(y_true, y_pred, delta=1):
     """Keras implementation for huber loss
@@ -36,11 +67,11 @@ def huber_loss(y_true, y_pred, delta=1):
     loss : Tensor
         loss values for all points
     """
-    error = (y_true - y_pred)
-    quad_error = 0.5*tf.math.square(error)
-    lin_error = delta*(tf.math.abs(error) - 0.5*delta)
+    error = torch.Tensor(y_true - y_pred)
+    quad_error = 0.5*torch.square(error)
+    lin_error = delta*(torch.abs(error) - 0.5*delta)
     # quadratic error, linear error
-    return tf.where(tf.math.abs(error) < delta, quad_error, lin_error)
+    return torch.where(torch.abs(error) < delta, quad_error, lin_error)
 
 def mean_huber_loss(y_true, y_pred, delta=1):
     """Calculates the mean value of huber loss
@@ -59,7 +90,7 @@ def mean_huber_loss(y_true, y_pred, delta=1):
     loss : Tensor
         average loss across points
     """
-    return tf.reduce_mean(huber_loss(y_true, y_pred, delta))
+    return torch.mean(huber_loss(y_true, y_pred, delta))
 
 class Agent():
     """Base class for all agents
@@ -129,6 +160,9 @@ class Agent():
         self._board_grid = np.arange(0, self._board_size**2)\
                              .reshape(self._board_size, -1)
         self._version = version
+        with open('model_config/{:s}.json'.format(self._version), 'r') as f:
+            self.model_config = json.loads(f.read())
+        self._device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     def get_gamma(self):
         """Returns the agent's gamma value
@@ -287,6 +321,7 @@ class DeepQLearningAgent(Agent):
     def reset_models(self):
         """ Reset all the models by creating new graphs"""
         self._model = self._agent_model()
+        #self._optimizer = torch.optim.Adam(self._model.parameters(), lr = 1e-6)
         if(self._use_target_net):
             self._target_net = self._agent_model()
             self.update_target_net()
@@ -325,13 +360,7 @@ class DeepQLearningAgent(Agent):
             Predicted model outputs on board, 
             of shape board.shape[0] * num actions
         """
-        # to correct dimensions and normalize
-        board = self._prepare_input(board)
-        # the default model to use
-        if model is None:
-            model = self._model
-        model_outputs = model.predict_on_batch(board)
-        return model_outputs
+        return self._board_size * self._n_actions
 
     def _normalize_board(self, board):
         """Normalize the board before input to the network
@@ -370,49 +399,7 @@ class DeepQLearningAgent(Agent):
         return np.argmax(np.where(legal_moves==1, model_outputs, -np.inf), axis=1)
 
     def _agent_model(self):
-        """Returns the model which evaluates Q values for a given state input
-
-        Returns
-        -------
-        model : TensorFlow Graph
-            DQN model graph
-        """
-        # define the input layer, shape is dependent on the board size and frames
-        with open('model_config/{:s}.json'.format(self._version), 'r') as f:
-            m = json.loads(f.read())
-        
-        input_board = Input((self._board_size, self._board_size, self._n_frames,), name='input')
-        x = input_board
-        for layer in m['model']:
-            l = m['model'][layer]
-            if('Conv2D' in layer):
-                # add convolutional layer
-                x = Conv2D(**l)(x)
-            if('Flatten' in layer):
-                x = Flatten()(x)
-            if('Dense' in layer):
-                x = Dense(**l)(x)
-        out = Dense(self._n_actions, activation='linear', name='action_values')(x)
-        model = Model(inputs=input_board, outputs=out)
-        model.compile(optimizer=RMSprop(0.0005), loss=mean_huber_loss)
-                
-        """
-        input_board = Input((self._board_size, self._board_size, self._n_frames,), name='input')
-        x = Conv2D(16, (3,3), activation='relu', data_format='channels_last')(input_board)
-        x = Conv2D(32, (3,3), activation='relu', data_format='channels_last')(x)
-        x = Conv2D(64, (6,6), activation='relu', data_format='channels_last')(x)
-        x = Flatten()(x)
-        x = Dense(64, activation = 'relu', name='action_prev_dense')(x)
-        # this layer contains the final output values, activation is linear since
-        # the loss used is huber or mse
-        out = Dense(self._n_actions, activation='linear', name='action_values')(x)
-        # compile the model
-        model = Model(inputs=input_board, outputs=out)
-        model.compile(optimizer=RMSprop(0.0005), loss=mean_huber_loss)
-        # model.compile(optimizer=RMSprop(0.0005), loss='mean_squared_error')
-        """
-
-        return model
+        return SnakeModel(self.model_config, self._board_size, self._n_frames).to(self._device)
 
     def set_weights_trainable(self):
         """Set selected layers to non trainable and compile the model"""
@@ -466,9 +453,11 @@ class DeepQLearningAgent(Agent):
             assert isinstance(iteration, int), "iteration should be an integer"
         else:
             iteration = 0
-        self._model.save_weights("{}/model_{:04d}.h5".format(file_path, iteration))
+
+        torch.save(self._model.state_dict(), "{}/model_{:04d}.h5".format(file_path, iteration))
+
         if(self._use_target_net):
-            self._target_net.save_weights("{}/model_{:04d}_target.h5".format(file_path, iteration))
+            torch.save(self._model.state_dict(), "{}/model_{:04d}_target.h5".format(file_path, iteration))
 
     def load_model(self, file_path='', iteration=None):
         """ load any existing models, if available """
@@ -492,9 +481,10 @@ class DeepQLearningAgent(Agent):
             assert isinstance(iteration, int), "iteration should be an integer"
         else:
             iteration = 0
-        self._model.load_weights("{}/model_{:04d}.h5".format(file_path, iteration))
+        self._model.load_state_dict(torch.load("{}/model_{:04d}.h5".format(file_path, iteration), weights_only=False))
+        self._model.eval()
         if(self._use_target_net):
-            self._target_net.load_weights("{}/model_{:04d}_target.h5".format(file_path, iteration))
+            self._target_net.load_state_dict(torch.load("{}/model_{:04d}.h5".format(file_path, iteration), weights_only=False))
         # print("Couldn't locate models at {}, check provided path".format(file_path))
 
     def print_models(self):
@@ -548,11 +538,25 @@ class DeepQLearningAgent(Agent):
         # create the target variable, only the column with action has different value
         target = self._get_model_outputs(s)
         # we bother only with the difference in reward estimate at the selected action
-        target = (1-a)*target + a*discounted_reward
+        target = torch.tensor((1-a)*target + a*discounted_reward)
+        target.requires_grad_ = True
+        #print(target)
+        #print(s)
         # fit
-        loss = self._model.train_on_batch(self._normalize_board(s), target)
+        # loss = self._model.train_on_batch(self._normalize_board(s), target)
         # loss = round(loss, 5)
-        return loss
+        optimizer = torch.optim.Adam(current_model.parameters(), lr = 1e-6)
+        criterion = nn.SmoothL1Loss()
+        #print(next_model_outputs)
+        #print(self._get_model_outputs(s))
+        #print(target)
+        loss = criterion(target, target)
+        #loss = criterion(next_model_outputs,self._get_model_outputs(s))
+        optimizer.zero_grad()
+        loss.requires_grad_ = True
+        #loss.backward()
+        optimizer.step()
+        return loss.item()
 
     def update_target_net(self):
         """Update the weights of the target network, which is kept
@@ -560,7 +564,7 @@ class DeepQLearningAgent(Agent):
         This should not be updated very frequently
         """
         if(self._use_target_net):
-            self._target_net.set_weights(self._model.get_weights())
+            self._target_net.load_state_dict(self._model.state_dict())
 
     def compare_weights(self):
         """Simple utility function to heck if the model and target 
@@ -599,7 +603,11 @@ class PolicyGradientAgent(DeepQLearningAgent):
                                 buffer_size=buffer_size, gamma=gamma,
                                 n_actions=n_actions, use_target_net=False,
                                 version=version)
-        self._actor_optimizer = tf.keras.optimizer.Adam(1e-6)
+        
+        # NEW:
+        self._actor_optimizer = torch.optim.Adam(lr = 1e-6)
+        # OLD:
+        # self._actor_optimizer = tf.keras.optimizer.Adam(1e-6)
 
     def _agent_model(self):
         """Returns the model which evaluates prob values for a given state input
@@ -611,12 +619,14 @@ class PolicyGradientAgent(DeepQLearningAgent):
         model : TensorFlow Graph
             Policy Gradient model graph
         """
+        # TODO Change this to pytorch
         input_board = Input((self._board_size, self._board_size, self._n_frames,))
         x = Conv2D(16, (4,4), activation = 'relu', data_format='channels_last', kernel_regularizer=l2(0.01))(input_board)
         x = Conv2D(32, (4,4), activation = 'relu', data_format='channels_last', kernel_regularizer=l2(0.01))(x)
         x = Flatten()(x)
         x = Dense(64, activation = 'relu', kernel_regularizer=l2(0.01))(x)
         out = Dense(self._n_actions, activation = 'linear', name = 'action_logits', kernel_regularizer=l2(0.01))(x)
+        # TODO end?
 
         model = Model(inputs = input_board, outputs = out)
         # do not compile the model here, but rather use the outputs separately
@@ -680,7 +690,10 @@ class AdvantageActorCriticAgent(PolicyGradientAgent):
                                 buffer_size=buffer_size, gamma=gamma,
                                 n_actions=n_actions, use_target_net=use_target_net,
                                 version=version)
-        self._optimizer = tf.keras.optimizers.RMSprop(5e-4)
+        # NEW:
+        self._optimizer = torch.optim.RMSprop(lr = 5e-4)
+        # OLD:
+        # self._optimizer = tf.keras.optimizers.RMSprop(5e-4)
 
     def _agent_model(self):
         """Returns the models which evaluate prob logits and action values 
@@ -694,6 +707,7 @@ class AdvantageActorCriticAgent(PolicyGradientAgent):
         model_full : TensorFlow Graph
             A2C model complete graph
         """
+        # OLD:
         input_board = Input((self._board_size, self._board_size, self._n_frames,))
         x = Conv2D(16, (3,3), activation='relu', data_format='channels_last')(input_board)
         x = Conv2D(32, (3,3), activation='relu', data_format='channels_last')(x)
@@ -1058,7 +1072,10 @@ class SupervisedLearningAgent(DeepQLearningAgent):
         # instead of the reward value
         self._model_action_out = Softmax()(self._model.get_layer('action_values').output)
         self._model_action = Model(inputs=self._model.get_layer('input').input, outputs=self._model_action_out)
-        self._model_action.compile(optimizer=Adam(0.0005), loss='categorical_crossentropy')
+        # NEW:
+        self._model_action.compile(optimizer=torch.optim.Adam(lr = 0.0005), loss='categorical_crossentropy')
+        # OLD:
+        # self._model_action.compile(optimizer=Adam(0.0005), loss='categorical_crossentropy')
         
     def train_agent(self, batch_size=32, num_games=1, epochs=5, 
                     reward_clip=False):

@@ -9,20 +9,20 @@
     "buffer_size":80000,
     "model":{
         "Conv2D":{
-            "filters":16,
+            "out_channels":16,
             "kernel_size":[3,3],
             "activation":"relu",
             "data_format":"channels_last",
             "padding":"same"
         },
         "Conv2D_1":{
-            "filters":32,
+            "out_channels":32,
             "kernel_size":[3,3],
             "activation":"relu",
             "data_format":"channels_last"
         },
         "Conv2D_2":{
-            "filters":64,
+            "out_channels":64,
             "kernel_size":[5,5],
             "activation":"relu",
             "data_format":"channels_last"
